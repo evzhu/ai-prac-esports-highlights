@@ -1,0 +1,16 @@
+{
+  "vod_001": {
+    "game": "League of Legends",
+    "series": "Worlds 2025 Finals Game 1",
+    "teams": ["T1", "KT"],
+    "duration_sec": 2708,
+    "url": "https://www.youtube.com/watch?v=sfVFGFfec64"
+  },
+  "vod_002": {
+    "game": "League of Legends",
+    "series": "Worlds 2025 Finals Game 2",
+    "teams": ["T1", "KT"],
+    "duration_sec": 2966,
+    "url": "https://www.youtube.com/watch?v=2ZldH1dHIjQ"
+  }
+}
