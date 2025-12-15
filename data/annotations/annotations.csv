@@ -1,3 +1,4 @@
+vod_id,start_sec,end_sec,label
 vod_001,0,5,Non-Highlight
 vod_001,5,10,Non-Highlight
 vod_001,10,15,Non-Highlight

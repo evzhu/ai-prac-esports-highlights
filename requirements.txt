@@ -1,3 +1,10 @@
 yt-dlp
-
-
+torch
+torchvision
+numpy
+pandas
+opencv-python
+librosa
+soundfile
+tqdm
+scikit-learn
