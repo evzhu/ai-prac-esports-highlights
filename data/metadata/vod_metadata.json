@@ -12,5 +12,12 @@
     "teams": ["T1", "KT"],
     "duration_sec": 2966,
     "url": "https://www.youtube.com/watch?v=2ZldH1dHIjQ"
+  },
+  "vod_003": {
+    "game": "League of Legends",
+    "series": "Worlds 2025 Finals Game 3",
+    "teams": ["T1", "KT"],
+    "duration_sec": 2604,
+    "url": "https://www.youtube.com/watch?v=RG8c8OqnvVg"
   }
 }

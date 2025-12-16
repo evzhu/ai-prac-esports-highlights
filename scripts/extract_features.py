@@ -11,6 +11,13 @@ Example:
     --audio_sr 16000 \
     --audio_mels 64
 
+Example only running on vod_002 and vod_003:
+ python scripts/extract_features.py \
+  --segments_csv data/annotations/segments.csv \
+  --raw_dir data/raw_vods \
+  --out_dir data/features \
+  --only_vods vod_002,vod_003
+
 segments.csv must have columns:
   vod_id,start_sec,end_sec,label
 
@@ -72,6 +79,22 @@ def parse_args() -> argparse.Namespace:
     # Performance
     p.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--batch_size", type=int, default=8, help="Batch segments for video embedding (frames stacked).")
+
+    # Restrict which vod_ids to process
+    p.add_argument(
+        "--only_vods",
+        type=str,
+        default="",
+        help="Comma-separated vod_ids to process (e.g. vod_002,vod_003). If empty, process all."
+    )
+
+    # Skip if output .npz already exists
+    p.add_argument(
+        "--skip_existing",
+        action="store_true",
+        help="Skip vods that already have an output .npz in out_dir."
+    )
+    p.set_defaults(skip_existing=True)  # default ON
 
     return p.parse_args()
 
@@ -295,6 +318,10 @@ def main() -> None:
     segs = load_segments(args.segments_csv)
     by_vod = group_by_vod(segs)
 
+    only_set = None
+    if args.only_vods.strip():
+        only_set = {v.strip() for v in args.only_vods.split(",") if v.strip()}
+
     do_audio = not args.video_only
     do_video = not args.audio_only
 
@@ -306,12 +333,20 @@ def main() -> None:
         video_model.eval()
 
     for vod_id, vod_segs in by_vod.items():
+        if only_set is not None and vod_id not in only_set:
+            continue
+
         video_path = os.path.join(args.raw_dir, f"{vod_id}.mp4")
         if not os.path.exists(video_path):
             print(f"[WARN] Missing video for {vod_id}: {video_path} (skipping)", file=sys.stderr)
             continue
 
         out_path = os.path.join(args.out_dir, f"{vod_id}.npz")
+
+        if args.skip_existing and os.path.exists(out_path):
+            print(f"[SKIP] {vod_id}: already exists -> {out_path}")
+            continue
+
         print(f"\n=== Processing {vod_id} ({len(vod_segs)} segments) ===")
         print(f"Video: {video_path}")
         print(f"Out:   {out_path}")
