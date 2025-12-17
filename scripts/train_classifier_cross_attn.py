@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-train_classifier.py
+train_classifier_cross_attn.py
 
 Train a binary highlight classifier from per-segment embeddings saved as .npz.
 
@@ -16,16 +16,17 @@ Models:
   - cross_attn: cross-modal attention fusion (video attends to audio) on a per-VOD sequence
 
 Example:
-  python scripts/train_classifier.py \
+  py scripts/train_classifier_cross_attn.py \
     --features_dir data/features \
     --holdout_vod vod_003 \
     --model_type cross_attn \
-    --out_path data/output/model.pt
+    --out_path data/models/model_cross_attn.pt
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -37,9 +38,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-# Sklearn for logreg baseline
+# Sklearn for logreg baseline + metrics
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import precision_recall_fscore_support, average_precision_score
+from sklearn.metrics import (
+    precision_recall_fscore_support,
+    average_precision_score,
+    roc_auc_score,
+    confusion_matrix,
+)
 
 
 # -----------------------------
@@ -293,24 +299,54 @@ def eval_mlp(model: nn.Module, X: np.ndarray, y: np.ndarray, device: str) -> Dic
 
 
 @torch.no_grad()
-def eval_cross_attn(model: nn.Module, vods: List[VodData], device: str) -> Dict[str, float]:
+def eval_cross_attn(
+    model: nn.Module,
+    vods: List[VodData],
+    device: str,
+    threshold: float = 0.5,
+) -> Dict[str, object]:
     model.eval()
     all_probs: List[np.ndarray] = []
     all_y: List[np.ndarray] = []
+
     for vd in vods:
         assert vd.X_video is not None and vd.X_audio is not None
         V = torch.from_numpy(vd.X_video).unsqueeze(0).to(device)  # [1, N, Dv]
         A = torch.from_numpy(vd.X_audio).unsqueeze(0).to(device)  # [1, N, Da]
         logits = model(V, A, key_padding_mask=None).squeeze(0).detach().cpu().numpy()
         probs = 1.0 / (1.0 + np.exp(-logits))
-        all_probs.append(probs)
+        all_probs.append(probs.astype(np.float32))
         all_y.append(vd.y.astype(np.int64))
+
     probs = np.concatenate(all_probs, axis=0)
     y_true = np.concatenate(all_y, axis=0)
-    y_pred = (probs >= 0.5).astype(np.int64)
-    p, r, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary", zero_division=0)
-    ap = average_precision_score(y_true, probs) if len(np.unique(y_true)) > 1 else float("nan")
-    return {"precision": float(p), "recall": float(r), "f1": float(f1), "pr_auc": float(ap)}
+
+    y_pred = (probs >= threshold).astype(np.int64)
+
+    p, r, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average="binary", zero_division=0
+    )
+    pr_auc = (
+        average_precision_score(y_true, probs)
+        if len(np.unique(y_true)) > 1
+        else float("nan")
+    )
+    roc_auc = (
+        roc_auc_score(y_true, probs)
+        if len(np.unique(y_true)) > 1
+        else float("nan")
+    )
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1]).tolist()
+
+    return {
+        "threshold": float(threshold),
+        "precision": float(p),
+        "recall": float(r),
+        "f1": float(f1),
+        "pr_auc": float(pr_auc),
+        "roc_auc": float(roc_auc),
+        "confusion_matrix": cm,
+    }
 
 
 # -----------------------------
@@ -385,8 +421,11 @@ def main() -> None:
 
     if test_vod is None:
         # If holdout wasn't in glob, load directly
-        test_vod = load_npz_split(holdout_path, vod_id=args.holdout_vod) if args.model_type == "cross_attn" else \
-                   load_npz_concat(holdout_path, vod_id=args.holdout_vod, want_audio=use_audio, want_video=use_video)
+        test_vod = (
+            load_npz_split(holdout_path, vod_id=args.holdout_vod)
+            if args.model_type == "cross_attn"
+            else load_npz_concat(holdout_path, vod_id=args.holdout_vod, want_audio=use_audio, want_video=use_video)
+        )
 
     if not train_vods:
         raise ValueError("No training VODs found (everything is holdout?). Add more .npz or change --holdout_vod.")
@@ -405,6 +444,16 @@ def main() -> None:
 
         # Standardize
         X_train_s, X_test_s, mu, sig = standardize_train_test(X_train, X_test)
+
+        # Print dataset summary like your other script
+        pos = int((y_train == 1).sum())
+        neg = int((y_train == 0).sum())
+        test_pos = int((y_test == 1).sum())
+        test_neg = int((y_test == 0).sum())
+        print(f"Train segments: {len(y_train)}  positives={pos}  negatives={neg}  pos_rate={pos / max(len(y_train), 1):.4f}")
+        print(f"Test  segments: {len(y_test)}  positives={test_pos}  negatives={test_neg}  pos_rate={test_pos / max(len(y_test), 1):.4f}")
+        print(f"Using features: audio={use_audio}, video={use_video}, dim={int(X_train_s.shape[1])}")
+        print(f"Model: {args.model_type}")
 
         # Train
         if args.model_type == "logreg":
@@ -443,13 +492,16 @@ def main() -> None:
         model = MLPBinary(in_dim=in_dim, hidden=args.hidden, dropout=args.dropout).to(device)
 
         # Imbalance weights
-        pos = int((y_train == 1).sum())
-        neg = int((y_train == 0).sum())
         pos_weight = torch.tensor([neg / max(pos, 1)], dtype=torch.float32, device=device)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-        train_dl = DataLoader(NPArrayDataset(X_train_s, y_train.astype(np.float32)), batch_size=args.batch_size, shuffle=True, num_workers=0)
+        train_dl = DataLoader(
+            NPArrayDataset(X_train_s, y_train.astype(np.float32)),
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,
+        )
 
         for epoch in range(1, args.epochs + 1):
             model.train()
@@ -469,10 +521,15 @@ def main() -> None:
 
             metrics = eval_mlp(model, X_test_s, y_test, device=device)
             print(
-                f"Epoch {epoch:02d}/{args.epochs} "
-                f"train_loss={train_loss:.4f} "
-                f"holdout_f1={metrics['f1']:.3f} holdout_pr_auc={metrics['pr_auc']:.3f}"
+                f"Epoch {epoch:02d}/{args.epochs}  "
+                f"loss={train_loss:.4f}  "
+                f"test_f1={metrics['f1']:.3f}  prec={metrics['precision']:.3f}  rec={metrics['recall']:.3f}  "
+                f"pr_auc={metrics['pr_auc']:.3f}"
             )
+
+        final_metrics = eval_mlp(model, X_test_s, y_test, device=device)
+        print("FINAL TEST METRICS:")
+        print(json.dumps({"threshold": 0.5, **final_metrics}, indent=2))
 
         ckpt = {
             "model_type": "mlp",
@@ -513,20 +570,31 @@ def main() -> None:
         Xc = np.concatenate([vd.X_video, vd.X_audio], axis=1)
         Xcs = standardize_with_stats(Xc, mu_, sig_)
         vd.X_video = Xcs[:, :dv]
-        vd.X_audio = Xcs[:, dv:dv+da]
+        vd.X_audio = Xcs[:, dv:dv + da]
         return vd
 
     train_vods = [apply_split_standardization(vd, mu, sig) for vd in train_vods]
     test_vod = apply_split_standardization(test_vod, mu, sig)
 
+    # ---- dataset summary (cross-attn) ----
+    train_y = np.concatenate([vd.y for vd in train_vods]).astype(np.int64)
+    test_y = test_vod.y.astype(np.int64)
+
+    train_pos = int((train_y == 1).sum())
+    train_neg = int((train_y == 0).sum())
+    test_pos = int((test_y == 1).sum())
+    test_neg = int((test_y == 0).sum())
+
+    print(f"Train segments: {len(train_y)}  positives={train_pos}  negatives={train_neg}  pos_rate={train_pos / max(len(train_y), 1):.4f}")
+    print(f"Test  segments: {len(test_y)}  positives={test_pos}  negatives={test_neg}  pos_rate={test_pos / max(len(test_y), 1):.4f}")
+    print(f"Using features: audio=True, video=True, dim={dv + da}  (dv={dv}, da={da})")
+    print(f"Model: cross_attn  d_model={args.d_model}  n_heads={args.n_heads}  dropout={args.dropout}")
+
     # Build model
     model = CrossModalFusion(dv=dv, da=da, d_model=args.d_model, n_heads=args.n_heads, dropout=args.dropout).to(device)
 
     # Compute pos_weight over TRAIN tokens
-    y_train_all = np.concatenate([vd.y for vd in train_vods], axis=0).astype(np.int64)
-    pos = int((y_train_all == 1).sum())
-    neg = int((y_train_all == 0).sum())
-    pos_weight = torch.tensor([neg / max(pos, 1)], dtype=torch.float32, device=device)
+    pos_weight = torch.tensor([train_neg / max(train_pos, 1)], dtype=torch.float32, device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -538,7 +606,7 @@ def main() -> None:
         collate_fn=collate_vod_sequences,
     )
 
-    # For quick reporting during training
+    # For reporting during training
     holdout_list = [test_vod]
 
     for epoch in range(1, args.epochs + 1):
@@ -568,12 +636,17 @@ def main() -> None:
 
         train_loss = running_loss / max(n_tokens, 1)
 
-        metrics = eval_cross_attn(model, holdout_list, device=device)
+        metrics = eval_cross_attn(model, holdout_list, device=device, threshold=0.5)
         print(
-            f"Epoch {epoch:02d}/{args.epochs} "
-            f"train_loss={train_loss:.4f} "
-            f"holdout_f1={metrics['f1']:.3f} holdout_pr_auc={metrics['pr_auc']:.3f}"
+            f"Epoch {epoch:02d}/{args.epochs}  "
+            f"loss={train_loss:.4f}  "
+            f"test_f1={metrics['f1']:.3f}  prec={metrics['precision']:.3f}  rec={metrics['recall']:.3f}  "
+            f"pr_auc={metrics['pr_auc']:.3f}  roc_auc={metrics['roc_auc']:.3f}"
         )
+
+    final_metrics = eval_cross_attn(model, holdout_list, device=device, threshold=0.5)
+    print("FINAL TEST METRICS:")
+    print(json.dumps(final_metrics, indent=2))
 
     ckpt = {
         "model_type": "cross_attn",
