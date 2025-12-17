@@ -26,5 +26,12 @@
     "teams": ["T1", "KT"],
     "duration_sec": 2220,
     "url": "https://www.youtube.com/watch?v=l47xGNAvX4M"
+  },
+  "vod_005": {
+    "game": "League of Legends",
+    "series": "Worlds 2025 Finals Game 5 - short clip",
+    "teams": ["T1", "KT"],
+    "duration_sec": 249,
+    "url": "https://www.youtube.com/watch?v=AXp6hL8MuDE"
   }
 }
